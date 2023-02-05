@@ -1,6 +1,7 @@
 import numpy as np
 import shapely
-from shapely.geometry import GeometryCollection, LineString, Point, Polygon
+from shapely.geometry import (GeometryCollection, LineString, MultiLineString,
+                              Point, Polygon)
 
 
 def set_axes_equal(ax):
@@ -31,13 +32,15 @@ def set_axes_equal(ax):
     ax.set_ylim3d([y_middle - plot_radius, y_middle + plot_radius])
     ax.set_zlim3d([z_middle - plot_radius, z_middle + plot_radius])
 
-def slice_stl(tris, plane_normal, plane_point):
+def slice_stl(tris, normals, plane_normal, plane_point):
     """
     Returns a list of points that represent the polygon of the cross-section
     of the mesh along the given plane
     
     tris : stl.mesh.Mesh
         triangles in the format of Mesh.vectors
+    normals : stl.mesh.normals
+        normals in the format of Mesh.normals
     plane_normal : np.array
         Normal vector of the slicing plane
     plane_point : np.array
@@ -54,15 +57,31 @@ def slice_stl(tris, plane_normal, plane_point):
         intersections = []
         for j, edge in enumerate(edges):
             # Skip if the edge and plane are parallel
+            # TODO: May increase runtime
             if np.dot(edge, plane_normal) == 0:
                 continue
             # Find the intersection of the edge and the plane
             t = np.dot(plane_normal, plane_point - verts[j]) / np.dot(plane_normal, edge)
             if t >= 0 and t <= 1:
-                intersections.append(Point((verts[j] + t * edge)[:2]))
-        if intersections and not shapely.equals(intersections[0], intersections[1]):
-            polygon_edges.append(LineString(intersections))
-    return polygon_edges
+                intersections.append(verts[j] + t * edge)
+        # If the "edge" has the start and end point at the same location, then it is just a point, so we can discard it   
+        # E.g. (1.5 0, 1.5 0) is a point, not an edge    
+        if intersections and not shapely.equals_exact(Point(intersections[0]), Point(intersections[1]), tolerance=1e-3): 
+            new_edge = intersections
+            new_edge_vector = np.array(new_edge[1]) - np.array(new_edge[0])
+            cross_product = np.cross(new_edge_vector, normals[i])
+            # TODO: May need to do normals[i] dot product with slicing plane to project normal onto plane before doing cross product
+            # 
+            if cross_product[2] < 0:
+                new_edge.reverse()
+            
+            # Remove the Z values
+            for i, edge in enumerate(new_edge):
+                new_edge[i] = edge[:2]
+            #new_edge = shapely.set_precision(LineString(new_edge), 0.01)
+            new_edge = (LineString(new_edge))
+            polygon_edges.append(new_edge)
+    return shapely.set_precision(MultiLineString(polygon_edges), 0.01)
 
 def stl_get_height(mesh):
     vertices = np.array(mesh.v0)
@@ -86,14 +105,14 @@ def sort_tris(mesh, layers):
     returns
     buckets: list of lists
         list of lists of triangles that intersect each layer"""
-    buckets = [[] for _ in range(len(layers))]
+    tri_buckets = [[] for _ in range(len(layers))]
+    normal_buckets = [[] for _ in range(len(layers))]
     num_tris = len(mesh.vectors)    
     
     # TODO: Optimize this    
     # For each triangle, find the layer it intersects    
     for i in range(num_tris):
         v1, v2, v3 = mesh.vectors[i]
-    
         # Find the minimum and maximum Z value for the triangle
         triangle_zs = np.array([v1[2], v2[2], v3[2]])
         min_z = np.min(triangle_zs)
@@ -105,6 +124,6 @@ def sort_tris(mesh, layers):
             # The triangle intersects the layer if the triangle's minimum Z is 
             # less than the layer's Z and maximum Z is greater than the layer's Z
             if layer >= min_z and layer <= max_z:
-                buckets[j].append((v1, v2, v3))
-    
-    return buckets
+                tri_buckets[j].append((v1, v2, v3))
+                normal_buckets[j].append(mesh.normals[i])
+    return tri_buckets, normal_buckets
